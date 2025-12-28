@@ -124,23 +124,38 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 }
 
 async function clearIFCFromScene() {
-  if (currentModel) {
+  // IMPORTANT: cleanup must never block the next load.
+  // Some operations (disposing models / resetting highlight) can take time or hang
+  // depending on browser/worker state. We do best-effort and move on.
+
+  const model = currentModel;
+  currentModel = null;
+
+  if (model) {
     try {
-      world.scene.three.remove(currentModel.object);
-      await currentModel.dispose();
+      world.scene.three.remove(model.object);
     } catch {
       // ignore
     }
+
+    // Dispose in background (do not await).
+    void model.dispose().catch(() => {
+      // ignore
+    });
   }
 
-  currentModel = null;
   storeys = [];
   storeySelect.innerHTML = `<option value="all">All</option>`;
   storeySelect.disabled = true;
   clearSelectionBtn.disabled = true;
-  await fragments.resetHighlight();
-  await hider.set(true);
-  setProps({});
+
+  // Best-effort background resets (do not await).
+  void fragments.resetHighlight().catch(() => {
+    // ignore
+  });
+  void hider.set(true).catch(() => {
+    // ignore
+  });
 }
 
 function escapeHtml(s: string) {
@@ -211,7 +226,18 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
 
   try {
     setProps({ status: 'Loading…', file: name, step: 'clear previous', tMs: msSince(startedAt) });
-    await withTimeout(clearIFCFromScene(), 10_000, 'clear previous model');
+    // Non-blocking cleanup (never fail the load)
+    try {
+      await withTimeout(clearIFCFromScene(), 2_000, 'clear previous model');
+    } catch (e) {
+      setProps({
+        status: 'Loading…',
+        file: name,
+        step: 'clear previous (skipped)',
+        warning: String(e),
+        tMs: msSince(startedAt),
+      });
+    }
 
     if (buffer.byteLength < 1024 && looksLikeHTML(buffer)) {
       throw new Error(
