@@ -107,6 +107,22 @@ function setProps(value: unknown) {
   propsEl.textContent = JSON.stringify(value, null, 2);
 }
 
+function msSince(startedAtMs: number) {
+  return Math.round((performance.now() - startedAtMs) * 10) / 10;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let t: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    t = window.setTimeout(() => reject(new Error(`Timed out after ${ms}ms at step: ${label}`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (t !== undefined) window.clearTimeout(t);
+  }
+}
+
 async function clearIFCFromScene() {
   if (currentModel) {
     try {
@@ -184,15 +200,18 @@ async function runDiagnostics() {
 }
 
 async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
+  const startedAt = performance.now();
   setProps({
     status: 'Loading…',
     file: name,
     sizeBytes: buffer.byteLength,
     sizeMB: Math.round((buffer.byteLength / (1024 * 1024)) * 100) / 100,
+    step: 'start',
   });
 
   try {
-    await clearIFCFromScene();
+    setProps({ status: 'Loading…', file: name, step: 'clear previous', tMs: msSince(startedAt) });
+    await withTimeout(clearIFCFromScene(), 10_000, 'clear previous model');
 
     if (buffer.byteLength < 1024 && looksLikeHTML(buffer)) {
       throw new Error(
@@ -209,22 +228,28 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
       });
     }
 
+    setProps({ status: 'Loading…', file: name, step: 'ifcLoader.load (parse + convert)', tMs: msSince(startedAt) });
     const bytes = new Uint8Array(buffer);
-    const model = await ifcLoader.load(bytes, true, name);
+    const model = await withTimeout(ifcLoader.load(bytes, true, name), 120_000, 'ifcLoader.load');
     currentModel = model;
     world.scene.three.add(model.object);
 
     // Force the fragments engine to finish pending geometry/material requests,
     // otherwise the model can appear "empty" and the bounding box is invalid.
-    await fragments.core.update(true);
+    setProps({ status: 'Loading…', file: name, step: 'fragments.core.update(true)', tMs: msSince(startedAt) });
+    await withTimeout(fragments.core.update(true), 120_000, 'fragments.core.update(true)');
 
+    setProps({ status: 'Loading…', file: name, step: 'classify storeys', tMs: msSince(startedAt) });
     await classifier.byIfcBuildingStorey({ classificationName: 'Storeys' });
 
     const groups = classifier.list.get('Storeys');
     const options: StoreyOption[] = [];
     if (groups) {
       for (const [groupName, groupData] of groups.entries()) {
-        options.push({ name: groupName, map: await groupData.get() });
+        options.push({
+          name: groupName,
+          map: await withTimeout(groupData.get(), 30_000, `classifier groupData.get (${groupName})`),
+        });
       }
     }
     options.sort((a, b) => a.name.localeCompare(b.name));
@@ -266,6 +291,7 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
         min: box.min.toArray(),
         max: box.max.toArray(),
       },
+      totalMs: Math.round(msSince(startedAt)),
     });
   } catch (e) {
     setProps({
@@ -357,4 +383,12 @@ clearSelectionBtn.addEventListener('click', () => {
 // Run once on startup so failures are immediately visible.
 runDiagnostics().catch(() => {
   // ignore
+});
+
+// Extra visibility into IFC load lifecycle
+ifcLoader.onIfcStartedLoading.add(() => {
+  setProps({ status: 'Loading…', step: 'IfcLoader: started loading' });
+});
+ifcLoader.onIfcImporterInitialized.add(() => {
+  setProps({ status: 'Loading…', step: 'IfcLoader: importer initialized' });
 });
