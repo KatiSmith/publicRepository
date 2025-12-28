@@ -25,5 +25,6 @@ Then open the URL printed by Vite.
 ### Notes
 
 - The WebIFC WASM (`public/web-ifc.wasm`) is copied automatically on install via a `postinstall` script.
+- If **“Load sample.ifc”** loads a tiny file (a few hundred bytes), it usually means the dev server is returning `index.html` (you don't actually have `public/sample.ifc`).
 - DWG is not handled in this starter (typical approach is: IFC for 3D + convert DWG to web-friendly 2D).
 

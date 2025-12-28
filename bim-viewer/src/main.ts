@@ -60,6 +60,7 @@ const world = worlds.create<OBC.SimpleScene, OBC.SimpleCamera, OBC.SimpleRendere
 world.scene = new OBC.SimpleScene(components);
 world.renderer = new OBC.SimpleRenderer(components, viewport, { antialias: true });
 world.camera = new OBC.SimpleCamera(components);
+world.renderer.mode = OBC.RendererMode.AUTO;
 
 components.init();
 world.scene.setup();
@@ -135,6 +136,23 @@ function escapeHtml(s: string) {
     .replaceAll("'", '&#039;');
 }
 
+function sniffHeaderText(buffer: ArrayBuffer, maxBytes = 512) {
+  const bytes = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, maxBytes));
+  // IFC is ASCII-compatible at the header; decode without throwing.
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+}
+
+function looksLikeIFC(buffer: ArrayBuffer) {
+  const header = sniffHeaderText(buffer).trimStart();
+  // Most IFC files start with ISO-10303-21; also allow common STEP headers.
+  return header.startsWith('ISO-10303-21') || header.includes('FILE_SCHEMA') || header.includes('DATA;');
+}
+
+function looksLikeHTML(buffer: ArrayBuffer) {
+  const header = sniffHeaderText(buffer).toLowerCase();
+  return header.includes('<!doctype html') || header.includes('<html') || header.includes('<head');
+}
+
 async function runDiagnostics() {
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
   const started = now();
@@ -176,10 +194,29 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
   try {
     await clearIFCFromScene();
 
+    if (buffer.byteLength < 1024 && looksLikeHTML(buffer)) {
+      throw new Error(
+        `The loaded file "${name}" looks like HTML, not IFC. If you clicked “Load sample.ifc”, you probably don't have a real sample at public/sample.ifc.`,
+      );
+    }
+    if (!looksLikeIFC(buffer)) {
+      // Not always fatal (some files have odd headers), but it's a very strong signal.
+      setProps({
+        status: 'Loading…',
+        file: name,
+        warning:
+          'This file does not look like a standard IFC header (ISO-10303-21). If it fails, share the file header and error.',
+      });
+    }
+
     const bytes = new Uint8Array(buffer);
     const model = await ifcLoader.load(bytes, true, name);
     currentModel = model;
     world.scene.three.add(model.object);
+
+    // Force the fragments engine to finish pending geometry/material requests,
+    // otherwise the model can appear "empty" and the bounding box is invalid.
+    await fragments.core.update(true);
 
     await classifier.byIfcBuildingStorey({ classificationName: 'Storeys' });
 
@@ -201,6 +238,12 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
 
     // Frame model
     const box = new THREE.Box3().setFromObject(model.object);
+    if (box.isEmpty()) {
+      const childCount = model.object.children.length;
+      throw new Error(
+        `Model loaded but produced an empty bounding box (children: ${childCount}). This usually means geometry didn't generate or is filtered out.`,
+      );
+    }
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
@@ -215,7 +258,15 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
       true,
     );
 
-    setProps({ status: 'Loaded', file: name, storeys: storeys.map((s) => s.name) });
+    setProps({
+      status: 'Loaded',
+      file: name,
+      storeys: storeys.map((s) => s.name),
+      bbox: {
+        min: box.min.toArray(),
+        max: box.max.toArray(),
+      },
+    });
   } catch (e) {
     setProps({
       status: 'Load failed',
@@ -279,7 +330,8 @@ diagnosticsBtn.addEventListener('click', () => {
 
 loadSampleBtn.addEventListener('click', async () => {
   try {
-    const res = await fetch('/sample.ifc');
+    const sampleURL = new URL(`${baseURL.replace(/\/+$/, '')}/sample.ifc`, window.location.href).href;
+    const res = await fetch(sampleURL, { cache: 'no-store' });
     if (!res.ok) throw new Error(`sample.ifc not found (HTTP ${res.status}). Put one in bim-viewer/public/sample.ifc`);
     await loadIFCFromArrayBuffer(await res.arrayBuffer(), 'sample.ifc');
   } catch (e) {
