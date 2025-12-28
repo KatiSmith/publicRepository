@@ -107,8 +107,26 @@ const selectionStyle: FRAGS.MaterialDefinition = {
   customId: 'selection',
 };
 
+function safeStringify(value: unknown, space = 2, maxChars = 200_000) {
+  const seen = new WeakSet<object>();
+  const json = JSON.stringify(
+    value,
+    (_key, val) => {
+      if (typeof val === 'object' && val !== null) {
+        if (seen.has(val)) return '[Circular]';
+        seen.add(val);
+      }
+      if (typeof val === 'bigint') return val.toString();
+      return val;
+    },
+    space,
+  );
+  if (json.length <= maxChars) return json;
+  return `${json.slice(0, maxChars)}\n…(truncated, ${json.length} chars total)…`;
+}
+
 function setProps(value: unknown) {
-  propsEl.textContent = JSON.stringify(value, null, 2);
+  propsEl.textContent = safeStringify(value, 2);
 }
 
 function msSince(startedAtMs: number) {
@@ -306,6 +324,10 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
     model.graphicsQuality = 1;
     disableFrustumCulling(model.object);
 
+    // Ensure the fragments LOD/culling system isn't hiding anything important.
+    model.useCamera(world.camera.three);
+    await withTimeout(model.setLodMode(FRAGS.LodMode.ALL_VISIBLE), 30_000, 'model.setLodMode(ALL_VISIBLE)');
+
     // Force the fragments engine to finish pending geometry/material requests,
     // otherwise the model can appear "empty" and the bounding box is invalid.
     setProps({ status: 'Loading…', file: name, step: 'fragments.core.update(true)', tMs: msSince(startedAt) });
@@ -396,7 +418,8 @@ async function pick(event: PointerEvent) {
   try {
     const data = await fragments.getData(map, {
       attributesDefault: true,
-      relationsDefault: { attributes: true, relations: true },
+      // Relations can be cyclic (Decomposes <-> IsDecomposedBy). Keep selection data safe/light.
+      relationsDefault: { attributes: false, relations: false },
     });
     setProps({ modelId: hit.fragments.modelId, localId: hit.localId, data: data[hit.fragments.modelId]?.[0] ?? null });
   } catch (e) {
@@ -426,7 +449,13 @@ diagnosticsBtn.addEventListener('click', () => {
 showAllBtn.addEventListener('click', () => {
   hider
     .set(true)
-    .then(() => fragments.core.update(true))
+    .then(async () => {
+      if (currentModel) {
+        currentModel.useCamera(world.camera.three);
+        await currentModel.setLodMode(FRAGS.LodMode.ALL_VISIBLE);
+      }
+      await fragments.core.update(true);
+    })
     .then(() => setProps({ status: 'Showing all' }))
     .catch((e) => setProps({ error: String(e) }));
 });
