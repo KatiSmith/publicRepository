@@ -76,7 +76,8 @@ const classifier = components.get(OBC.Classifier);
 const ifcLoader = components.get(OBC.IfcLoader);
 await ifcLoader.setup({
   autoSetWasm: false,
-  wasm: { path: '/web-ifc.wasm', absolute: true },
+  // Use a relative path so it works in more hosting setups (dev/preview/subpaths).
+  wasm: { path: 'web-ifc.wasm', absolute: false },
 });
 
 let currentModel: FRAGS.FragmentsModel | null = null;
@@ -127,38 +128,61 @@ function escapeHtml(s: string) {
 }
 
 async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
-  await clearIFCFromScene();
+  setProps({ status: 'Loading…', file: name });
 
-  const bytes = new Uint8Array(buffer);
-  const model = await ifcLoader.load(bytes, true, name);
-  currentModel = model;
-  world.scene.three.add(model.object);
+  try {
+    await clearIFCFromScene();
 
-  await classifier.byIfcBuildingStorey({ classificationName: 'Storeys' });
+    const bytes = new Uint8Array(buffer);
+    const model = await ifcLoader.load(bytes, true, name);
+    currentModel = model;
+    world.scene.three.add(model.object);
 
-  const groups = classifier.list.get('Storeys');
-  const options: StoreyOption[] = [];
-  if (groups) {
-    for (const [groupName, groupData] of groups.entries()) {
-      options.push({ name: groupName, map: await groupData.get() });
+    await classifier.byIfcBuildingStorey({ classificationName: 'Storeys' });
+
+    const groups = classifier.list.get('Storeys');
+    const options: StoreyOption[] = [];
+    if (groups) {
+      for (const [groupName, groupData] of groups.entries()) {
+        options.push({ name: groupName, map: await groupData.get() });
+      }
     }
+    options.sort((a, b) => a.name.localeCompare(b.name));
+    storeys = options;
+
+    storeySelect.innerHTML =
+      `<option value="all">All</option>` +
+      storeys.map((s) => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`).join('');
+    storeySelect.disabled = false;
+    clearSelectionBtn.disabled = false;
+
+    // Frame model
+    const box = new THREE.Box3().setFromObject(model.object);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const dist = maxDim * 1.2;
+    world.camera.controls.setLookAt(
+      center.x + dist,
+      center.y + dist * 0.75,
+      center.z + dist,
+      center.x,
+      center.y,
+      center.z,
+      true,
+    );
+
+    setProps({ status: 'Loaded', file: name, storeys: storeys.map((s) => s.name) });
+  } catch (e) {
+    setProps({
+      status: 'Load failed',
+      file: name,
+      error: String(e),
+      hint:
+        'Open the browser DevTools Console/Network tab: missing web-ifc.wasm or worker files are the most common causes.',
+    });
+    throw e;
   }
-  options.sort((a, b) => a.name.localeCompare(b.name));
-  storeys = options;
-
-  storeySelect.innerHTML =
-    `<option value="all">All</option>` +
-    storeys.map((s) => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`).join('');
-  storeySelect.disabled = false;
-  clearSelectionBtn.disabled = false;
-
-  // Frame model
-  const box = new THREE.Box3().setFromObject(model.object);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-  const maxDim = Math.max(size.x, size.y, size.z);
-  const dist = maxDim * 1.2;
-  world.camera.controls.setLookAt(center.x + dist, center.y + dist * 0.75, center.z + dist, center.x, center.y, center.z, true);
 }
 
 async function pick(event: PointerEvent) {
@@ -199,7 +223,11 @@ world.renderer!.three.domElement.addEventListener('pointerdown', (e) => {
 fileInput.addEventListener('change', async () => {
   const f = fileInput.files?.[0];
   if (!f) return;
-  await loadIFCFromArrayBuffer(await f.arrayBuffer(), f.name);
+  try {
+    await loadIFCFromArrayBuffer(await f.arrayBuffer(), f.name);
+  } catch {
+    // error is already shown in the UI
+  }
 });
 
 loadSampleBtn.addEventListener('click', async () => {

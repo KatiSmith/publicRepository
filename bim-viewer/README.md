@@ -15,6 +15,7 @@ npm run dev
 ```
 
 Then open the URL printed by Vite.
+**Don’t open `index.html` directly** (IFC loading uses WASM + a module web worker and needs an HTTP server).
 
 ### Load your IFC
 
