@@ -21,6 +21,8 @@ app.innerHTML = `
         </label>
         <button id="loadSample" type="button">Load sample.ifc</button>
         <button id="diagnostics" type="button">Diagnostics</button>
+        <button id="showAll" type="button" disabled>Show all</button>
+        <button id="fitView" type="button" disabled>Fit view</button>
         <label class="label">
           Floor:
           <select id="storeySelect" disabled>
@@ -50,6 +52,8 @@ const fileInput = document.querySelector<HTMLInputElement>('#ifcFile')!;
 const storeySelect = document.querySelector<HTMLSelectElement>('#storeySelect')!;
 const loadSampleBtn = document.querySelector<HTMLButtonElement>('#loadSample')!;
 const diagnosticsBtn = document.querySelector<HTMLButtonElement>('#diagnostics')!;
+const showAllBtn = document.querySelector<HTMLButtonElement>('#showAll')!;
+const fitViewBtn = document.querySelector<HTMLButtonElement>('#fitView')!;
 const clearSelectionBtn = document.querySelector<HTMLButtonElement>('#clearSelection')!;
 const propsEl = document.querySelector<HTMLPreElement>('#props')!;
 
@@ -92,6 +96,7 @@ await ifcLoader.setup({
 let currentModel: FRAGS.FragmentsModel | null = null;
 type StoreyOption = { name: string; map: OBC.ModelIdMap };
 let storeys: StoreyOption[] = [];
+let lastBBox: THREE.Box3 | null = null;
 
 const pointer = new THREE.Vector2();
 const selectionStyle: FRAGS.MaterialDefinition = {
@@ -145,9 +150,12 @@ async function clearIFCFromScene() {
   }
 
   storeys = [];
+  lastBBox = null;
   storeySelect.innerHTML = `<option value="all">All</option>`;
   storeySelect.disabled = true;
   clearSelectionBtn.disabled = true;
+  showAllBtn.disabled = true;
+  fitViewBtn.disabled = true;
 
   // Best-effort background resets (do not await).
   void fragments.resetHighlight().catch(() => {
@@ -165,6 +173,27 @@ function escapeHtml(s: string) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;');
+}
+
+function fitViewToBBox(box: THREE.Box3) {
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const dist = Math.max(1, maxDim * 1.2);
+  world.camera.controls.setLookAt(
+    center.x + dist,
+    center.y + dist * 0.75,
+    center.z + dist,
+    center.x,
+    center.y,
+    center.z,
+    true,
+  );
+}
+
+function computeModelBBox(object: THREE.Object3D) {
+  const box = new THREE.Box3().setFromObject(object);
+  return box;
 }
 
 function sniffHeaderText(buffer: ArrayBuffer, maxBytes = 512) {
@@ -265,6 +294,10 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
     setProps({ status: 'Loading…', file: name, step: 'fragments.core.update(true)', tMs: msSince(startedAt) });
     await withTimeout(fragments.core.update(true), 120_000, 'fragments.core.update(true)');
 
+    // Ensure nothing is hidden by default.
+    setProps({ status: 'Loading…', file: name, step: 'show all', tMs: msSince(startedAt) });
+    await withTimeout(hider.set(true), 30_000, 'hider.set(true)');
+
     setProps({ status: 'Loading…', file: name, step: 'classify storeys', tMs: msSince(startedAt) });
     await classifier.byIfcBuildingStorey({ classificationName: 'Storeys' });
 
@@ -286,28 +319,19 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
       storeys.map((s) => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`).join('');
     storeySelect.disabled = false;
     clearSelectionBtn.disabled = false;
+    showAllBtn.disabled = false;
+    fitViewBtn.disabled = false;
 
     // Frame model
-    const box = new THREE.Box3().setFromObject(model.object);
+    const box = computeModelBBox(model.object);
     if (box.isEmpty()) {
       const childCount = model.object.children.length;
       throw new Error(
         `Model loaded but produced an empty bounding box (children: ${childCount}). This usually means geometry didn't generate or is filtered out.`,
       );
     }
-    const size = box.getSize(new THREE.Vector3());
-    const center = box.getCenter(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z);
-    const dist = maxDim * 1.2;
-    world.camera.controls.setLookAt(
-      center.x + dist,
-      center.y + dist * 0.75,
-      center.z + dist,
-      center.x,
-      center.y,
-      center.z,
-      true,
-    );
+    lastBBox = box;
+    fitViewToBBox(box);
 
     setProps({
       status: 'Loaded',
@@ -378,6 +402,29 @@ fileInput.addEventListener('change', async () => {
 
 diagnosticsBtn.addEventListener('click', () => {
   runDiagnostics().catch((e) => setProps({ diagnosticsError: String(e) }));
+});
+
+showAllBtn.addEventListener('click', () => {
+  hider
+    .set(true)
+    .then(() => fragments.core.update(true))
+    .then(() => setProps({ status: 'Showing all' }))
+    .catch((e) => setProps({ error: String(e) }));
+});
+
+fitViewBtn.addEventListener('click', () => {
+  if (!currentModel) return;
+  const box = computeModelBBox(currentModel.object);
+  if (box.isEmpty()) {
+    setProps({ error: 'Cannot fit view: model bounding box is empty.' });
+    return;
+  }
+  lastBBox = box;
+  fitViewToBBox(box);
+  setProps({
+    status: 'Fit view',
+    bbox: { min: box.min.toArray(), max: box.max.toArray() },
+  });
 });
 
 loadSampleBtn.addEventListener('click', async () => {
