@@ -96,7 +96,6 @@ await ifcLoader.setup({
 let currentModel: FRAGS.FragmentsModel | null = null;
 type StoreyOption = { name: string; map: OBC.ModelIdMap };
 let storeys: StoreyOption[] = [];
-let lastBBox: THREE.Box3 | null = null;
 
 const pointer = new THREE.Vector2();
 const selectionStyle: FRAGS.MaterialDefinition = {
@@ -150,7 +149,6 @@ async function clearIFCFromScene() {
   }
 
   storeys = [];
-  lastBBox = null;
   storeySelect.innerHTML = `<option value="all">All</option>`;
   storeySelect.disabled = true;
   clearSelectionBtn.disabled = true;
@@ -194,6 +192,21 @@ function fitViewToBBox(box: THREE.Box3) {
 function computeModelBBox(object: THREE.Object3D) {
   const box = new THREE.Box3().setFromObject(object);
   return box;
+}
+
+function disableFrustumCulling(object: THREE.Object3D) {
+  object.traverse((o) => {
+    (o as any).frustumCulled = false;
+  });
+}
+
+function updateCameraClippingFromBBox(box: THREE.Box3) {
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const cam = world.camera.three;
+  cam.near = Math.max(0.01, maxDim / 10_000);
+  cam.far = Math.max(10_000, maxDim * 50);
+  cam.updateProjectionMatrix();
 }
 
 function sniffHeaderText(buffer: ArrayBuffer, maxBytes = 512) {
@@ -288,6 +301,10 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
     const model = await withTimeout(ifcLoader.load(bytes, true, name), 120_000, 'ifcLoader.load');
     currentModel = model;
     world.scene.three.add(model.object);
+    // Improve "partial model" issues (streaming/culling).
+    model.getClippingPlanesEvent = () => world.renderer!.three.clippingPlanes ?? [];
+    model.graphicsQuality = 1;
+    disableFrustumCulling(model.object);
 
     // Force the fragments engine to finish pending geometry/material requests,
     // otherwise the model can appear "empty" and the bounding box is invalid.
@@ -330,8 +347,10 @@ async function loadIFCFromArrayBuffer(buffer: ArrayBuffer, name = 'model.ifc') {
         `Model loaded but produced an empty bounding box (children: ${childCount}). This usually means geometry didn't generate or is filtered out.`,
       );
     }
-    lastBBox = box;
+    updateCameraClippingFromBBox(box);
     fitViewToBBox(box);
+    // After moving the camera, force another update in case geometry loads by view.
+    await withTimeout(fragments.core.update(true), 60_000, 'fragments.core.update(true) after fit');
 
     setProps({
       status: 'Loaded',
@@ -419,7 +438,6 @@ fitViewBtn.addEventListener('click', () => {
     setProps({ error: 'Cannot fit view: model bounding box is empty.' });
     return;
   }
-  lastBBox = box;
   fitViewToBBox(box);
   setProps({
     status: 'Fit view',
