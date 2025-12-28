@@ -5,6 +5,7 @@ import * as FRAGS from '@thatopen/fragments';
 
 const baseURL = import.meta.env.BASE_URL || '/';
 const wasmDir = baseURL.endsWith('/') ? baseURL : `${baseURL}/`;
+const wasmDirAbs = new URL(wasmDir, window.location.href).href;
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -84,7 +85,7 @@ await ifcLoader.setup({
   autoSetWasm: false,
   // IMPORTANT: web-ifc expects a DIRECTORY, and will request `${path}/web-ifc.wasm`.
   // Use Vite's base URL so it also works when hosted under a sub-path.
-  wasm: { path: wasmDir, absolute: false },
+  wasm: { path: wasmDirAbs, absolute: true },
 });
 
 let currentModel: FRAGS.FragmentsModel | null = null;
@@ -141,6 +142,7 @@ async function runDiagnostics() {
   const checks: Record<string, unknown> = {
     baseURL,
     wasmDir,
+    wasmDirAbs,
     fragmentsWorkerURL,
     userAgent: navigator.userAgent,
   };
